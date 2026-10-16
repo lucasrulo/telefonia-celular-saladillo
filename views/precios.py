@@ -64,9 +64,10 @@ with tab_m:
             })
         aplicar = ed[ed["aplicar"]]
         if st.button(f"Aplicar a {len(aplicar)} productos", type="primary", disabled=aplicar.empty):
-            for _, r in aplicar.iterrows():
-                db.actualizar_producto(int(r["id"]), motivo=f"Masivo: {modo} ({pct:+.1f}%)",
-                                       costo=float(r["costo_nuevo"]), precio=float(r["precio_nuevo"]))
+            with db.lote(f"Actualización masiva de precios ({len(aplicar)} productos, {pct:+.1f}%)"):
+                for _, r in aplicar.iterrows():
+                    db.actualizar_producto(int(r["id"]), motivo=f"Masivo: {modo} ({pct:+.1f}%)",
+                                           costo=float(r["costo_nuevo"]), precio=float(r["precio_nuevo"]))
             st.toast(f"✓ {len(aplicar)} precios actualizados")
             st.rerun()
 

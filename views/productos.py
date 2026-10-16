@@ -141,17 +141,18 @@ with tab_inv:
             campos = ["nombre", "categoria", "costo", "precio", "stock", "stock_minimo", "activo"]
             orig = v.set_index("id")
             n = 0
-            for _, row in edit.iterrows():
-                o = orig.loc[row["id"]]
-                cambios = {c: row[c] for c in campos if pd.notna(row[c]) and row[c] != o[c]}
-                if cambios:
-                    for c in ("stock", "stock_minimo"):
-                        if c in cambios:
-                            cambios[c] = int(cambios[c])
-                    if "activo" in cambios:
-                        cambios["activo"] = bool(cambios["activo"])
-                    db.actualizar_producto(int(row["id"]), motivo="Edición inventario", **cambios)
-                    n += 1
+            with db.lote("Edición de inventario"):
+                for _, row in edit.iterrows():
+                    o = orig.loc[row["id"]]
+                    cambios = {c: row[c] for c in campos if pd.notna(row[c]) and row[c] != o[c]}
+                    if cambios:
+                        for c in ("stock", "stock_minimo"):
+                            if c in cambios:
+                                cambios[c] = int(cambios[c])
+                        if "activo" in cambios:
+                            cambios["activo"] = bool(cambios["activo"])
+                        db.actualizar_producto(int(row["id"]), motivo="Edición inventario", **cambios)
+                        n += 1
             if n:
                 ss.pop("inv_editor", None)
                 st.toast(f"✓ {n} producto(s) actualizados")

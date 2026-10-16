@@ -13,26 +13,37 @@ App en **Streamlit** con punto de venta compatible con **pistola lectora de cód
 | **Dashboard** | Venta bruta, ganancia, margen, tickets, ticket promedio, unidades, comparación vs período anterior, reparaciones cobradas y ganancia, total del negocio, stock en unidades y valorizado ($ costo / $ venta), evolución diaria, categorías, top productos, medios de pago, mapa de calor por día/hora, stock a reponer y stock inmovilizado. |
 | **Historial de ventas** | Tickets por rango, detalle, anulación (devuelve stock), export Excel. |
 
-## Correr local
+## Dónde se guardan los datos
 
+Todo queda en **archivos CSV** (una tabla por archivo: productos, ventas, detalle de ventas, movimientos de stock, historial de precios, reparaciones, historial de reparaciones y configuración).
+
+- **Con respaldo en GitHub (recomendado):** los CSV viven en un repo **privado** tuyo. Al arrancar, la app los descarga; después de cada operación (venta, alta, cambio de estado…) sube las tablas que cambiaron en un commit. Cada commit es un backup: en GitHub ves el historial y podés volver a cualquier versión.
+- Si al arrancar no puede leer GitHub, **la app no arranca** (así nunca pisa tus datos con una base vacía).
+- Si falla una subida (sin internet), la barra lateral avisa "cambios sin subir" con un botón para reintentar; el próximo guardado también sube lo pendiente.
+- Siempre queda además una copia local en `data/csv/`, y en *Configuración* podés descargar un backup .zip con todos los CSV.
+- Sin configurar GitHub, guarda sólo en la PC (`data/`).
+
+## Puesta en marcha (GitHub + Streamlit Cloud)
+
+1. **Repo de la app:** creá un repo `telefonia-celular-saladillo` y subí estos archivos.
+2. **Repo de datos:** creá OTRO repo, **privado**, vacío (ej. `telefonia-celular-saladillo-datos`). Tiene que ser otro repo porque Streamlit reinicia la app cada vez que cambia el repo de la app.
+3. **Token:** GitHub → Settings → Developer settings → *Fine-grained tokens* → Generate. *Repository access:* sólo `telefonia-celular-saladillo-datos`. *Permissions → Contents:* **Read and write**. Poné vencimiento largo (o sin vencimiento) y anotá la fecha si vence.
+4. **Streamlit Cloud** ([share.streamlit.io](https://share.streamlit.io)) → *New app* → repo `lucasrulo/telefonia-celular-saladillo`, archivo `app.py` → *Advanced settings → Secrets*:
+   ```toml
+   DATA_REPO = "lucasrulo/telefonia-celular-saladillo-datos"
+   GITHUB_TOKEN = "github_pat_..."
+   APP_PASSWORD = "una-clave-para-el-local"
+   ```
+5. Abrís la app y la barra lateral muestra "☁️ Guardado en GitHub".
+
+### Correr en la PC del local
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
-Sin configuración usa **SQLite** en `data/celupos.db`. En *Configuración* podés cargar datos demo para probar.
+Para que también respalde en GitHub, copiá `.streamlit/secrets.toml.example` a `.streamlit/secrets.toml` y completalo.
 
-## Subir a GitHub + Streamlit Cloud
-
-1. Creá un repo nuevo en GitHub (ej. `celupos`) y subí todos estos archivos (`git init && git add . && git commit -m "CeluPOS" && git remote add origin https://github.com/<usuario>/celupos.git && git push -u origin main`).
-2. **Base de datos en la nube (obligatorio en Streamlit Cloud):** el disco de Streamlit Cloud se borra en cada reinicio, así que SQLite ahí pierde los datos. Creá un Postgres gratis en [Supabase](https://supabase.com) o [Neon](https://neon.tech) y copiá el connection string.
-   - Supabase: *Project Settings → Database → Connection string → Session pooler* (puerto 5432).
-3. En [share.streamlit.io](https://share.streamlit.io) → *New app* → elegí el repo, `app.py`.
-4. *Advanced settings → Secrets*:
-   ```toml
-   DATABASE_URL = "postgresql://postgres.xxxx:CLAVE@aws-0-sa-east-1.pooler.supabase.com:5432/postgres"
-   APP_PASSWORD = "una-clave-para-el-local"
-   ```
-Las tablas se crean solas al primer arranque.
+> No uses la app en la nube y en la PC al mismo tiempo: cada una tiene su copia de trabajo y la última que guarda pisa las tablas de la otra. Usá una sola (la de Streamlit Cloud sirve desde cualquier PC o celular).
 
 ## Pistola lectora
 
@@ -42,7 +53,8 @@ Cualquier lector USB/Bluetooth en modo teclado (HID) con sufijo *Enter* (default
 
 ```
 app.py              # navegación + login opcional
-core/db.py          # modelo de datos (SQLAlchemy: SQLite o Postgres)
+core/db.py          # modelo de datos (SQLite de trabajo)
+core/storage.py     # guardado en CSV + sincronización con GitHub
 core/ui.py          # estilos, KPIs, formato $
 views/              # una página por módulo
 .streamlit/         # tema + ejemplo de secrets

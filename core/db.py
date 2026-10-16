@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
+
+from core import storage
 from sqlalchemy import (
     Boolean, Column, DateTime, Float, ForeignKey, Integer, MetaData, String,
     Table, Text, create_engine, func, insert, select, update, delete,
@@ -119,34 +122,60 @@ config = Table(
 ESTADOS = ["Para enviar", "En reparación", "Reparado", "Sin solución", "Devuelto"]
 MEDIOS_PAGO = ["Efectivo", "Débito", "Crédito", "Transferencia", "Mercado Pago"]
 DEFAULT_CONFIG = {
-    "negocio": "CeluPOS",
+    "negocio": "Telefonía Celular Saladillo",
     "fee_mano_obra": "15000",
     "categorias": "Celulares,Fundas,Cargadores,Cables,Auriculares,Templados,Accesorios,Repuestos",
 }
 
 
-def _db_url() -> str:
-    try:
-        url = st.secrets.get("DATABASE_URL", "")
-    except Exception:
-        url = ""
-    url = url or os.environ.get("DATABASE_URL", "")
-    if url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql://", 1)
-    if not url:
-        os.makedirs("data", exist_ok=True)
-        url = "sqlite:///data/celupos.db"
-    return url
+DB_PATH = "data/celupos.db"
+TABLAS = {t.name: t for t in [config, productos, ventas, reparaciones, movimientos,
+                              historial_precios, venta_items, reparacion_log]}
 
 
-@st.cache_resource(show_spinner=False)
+def _convertir(tabla: Table, d: pd.DataFrame) -> list[dict]:
+    for col in tabla.columns:
+        if col.name not in d:
+            continue
+        tipo = type(col.type)
+        if tipo is DateTime:
+            d[col.name] = pd.to_datetime(d[col.name], errors="coerce")
+        elif tipo in (Integer, Float):
+            d[col.name] = pd.to_numeric(d[col.name], errors="coerce")
+        elif tipo is Boolean:
+            d[col.name] = d[col.name].astype(str).str.lower().map({"true": True, "1": True, "false": False, "0": False})
+        else:
+            d[col.name] = d[col.name].replace("", None)
+    d = d[[c.name for c in tabla.columns if c.name in d]].astype(object)
+    d = d.where(pd.notna(d), None)
+    filas = d.to_dict("records")
+    for f in filas:  # pandas Timestamp -> datetime nativo
+        for k, v in f.items():
+            if isinstance(v, pd.Timestamp):
+                f[k] = v.to_pydatetime()
+    return filas
+
+
+@st.cache_resource(show_spinner="Cargando datos…")
 def get_engine():
-    url = _db_url()
-    kw = {"pool_pre_ping": True}
-    if url.startswith("sqlite"):
-        kw["connect_args"] = {"check_same_thread": False}
-    eng = create_engine(url, **kw)
+    os.makedirs("data", exist_ok=True)
+    datos = None
+    if storage.habilitado():
+        # GitHub es la fuente de verdad: si no se puede leer, NO arrancamos (evita pisar datos con una base vacía)
+        datos = storage.descargar_todo()
+        if os.path.exists(DB_PATH):
+            os.remove(DB_PATH)
+    eng = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
     metadata.create_all(eng)
+    if datos:
+        from io import StringIO
+        with eng.begin() as c:
+            for nombre, texto in datos.items():
+                if nombre in TABLAS and texto.strip():
+                    d = pd.read_csv(StringIO(texto), dtype=str, keep_default_na=False)
+                    filas = _convertir(TABLAS[nombre], d)
+                    if filas:
+                        c.execute(insert(TABLAS[nombre]), filas)
     with eng.begin() as c:
         existentes = {r[0] for r in c.execute(select(config.c.clave))}
         for k, v in DEFAULT_CONFIG.items():
@@ -155,8 +184,41 @@ def get_engine():
     return eng
 
 
-def is_sqlite() -> bool:
-    return get_engine().url.get_backend_name() == "sqlite"
+def exportar_csv(nombres=None) -> dict[str, str]:
+    nombres = nombres or list(TABLAS)
+    out = {}
+    with get_engine().connect() as c:
+        for n in nombres:
+            d = pd.read_sql(select(TABLAS[n]).order_by(list(TABLAS[n].primary_key.columns)[0]), c)
+            out[n] = d.to_csv(index=False, date_format="%Y-%m-%d %H:%M:%S")
+    return out
+
+
+_lote = {"activo": False, "tablas": set()}
+
+
+def persistir(nombres, mensaje: str):
+    if _lote["activo"]:
+        _lote["tablas"].update(nombres)
+        return
+    storage.guardar(exportar_csv(nombres), mensaje)
+
+
+@contextmanager
+def lote(mensaje: str):
+    """Agrupa muchas operaciones en un solo guardado/commit."""
+    _lote.update(activo=True, tablas=set())
+    try:
+        yield
+    finally:
+        tablas = list(_lote["tablas"])
+        _lote.update(activo=False, tablas=set())
+        if tablas:
+            storage.guardar(exportar_csv(tablas), mensaje)
+
+
+def persistir_todo(mensaje="Sincronización completa"):
+    storage.guardar(exportar_csv(list(TABLAS)), mensaje, forzar=True)
 
 
 def df(stmt, params=None) -> pd.DataFrame:
@@ -176,6 +238,7 @@ def set_config(clave: str, valor: str):
         r = c.execute(update(config).where(config.c.clave == clave).values(valor=str(valor)))
         if r.rowcount == 0:
             c.execute(insert(config).values(clave=clave, valor=str(valor)))
+    persistir(["config"], f"Config {clave}")
 
 
 def categorias() -> list[str]:
@@ -229,6 +292,7 @@ def crear_producto(codigo, nombre, categoria, costo, precio, stock, stock_minimo
             c.execute(insert(movimientos).values(
                 producto_id=pid, tipo="ingreso", cantidad=int(stock), costo_unit=float(costo),
                 referencia="Alta", fecha=datetime.now()))
+    persistir(["productos", "movimientos_stock"], f"Alta producto {codigo}")
     return pid
 
 
@@ -253,9 +317,11 @@ def ingresar_stock(pid: int, cantidad: int, costo_nuevo: float | None = None,
                 producto_id=pid, costo_anterior=p["costo"], costo_nuevo=vals.get("costo", p["costo"]),
                 precio_anterior=p["precio"], precio_nuevo=vals.get("precio", p["precio"]),
                 motivo="Ingreso de stock", fecha=datetime.now()))
+    persistir(["productos", "movimientos_stock", "historial_precios"], f"{tipo.capitalize()} stock producto {pid}")
 
 
-def actualizar_producto(pid: int, motivo="Edición", **campos):
+def actualizar_producto(pid: int, motivo="Edición", diferir=False, **campos):
+    """diferir=True: no sube a GitHub (para lotes; llamar persistir() al final)."""
     with get_engine().begin() as c:
         p = c.execute(select(productos).where(productos.c.id == pid)).mappings().first()
         if p is None:
@@ -273,6 +339,8 @@ def actualizar_producto(pid: int, motivo="Edición", **campos):
                 producto_id=pid, costo_anterior=p["costo"], costo_nuevo=nuevo_costo,
                 precio_anterior=p["precio"], precio_nuevo=nuevo_precio,
                 motivo=motivo, fecha=datetime.now()))
+    if not diferir:
+        persistir(["productos", "movimientos_stock", "historial_precios"], f"{motivo} producto {pid}")
 
 
 def historial_precios_df() -> pd.DataFrame:
@@ -306,6 +374,7 @@ def registrar_venta(items: list[dict], medio_pago: str, descuento: float, client
             c.execute(insert(movimientos).values(
                 producto_id=i["id"], tipo="venta", cantidad=-i["cantidad"],
                 costo_unit=i["costo"], referencia=f"Venta #{vid}", fecha=now))
+    persistir(["ventas", "venta_items", "productos", "movimientos_stock"], f"Venta #{vid} {total:.0f}")
     return vid
 
 
@@ -322,6 +391,7 @@ def anular_venta(vid: int):
                 producto_id=i["producto_id"], tipo="anulacion", cantidad=i["cantidad"],
                 costo_unit=i["costo_unit"], referencia=f"Anula venta #{vid}", fecha=datetime.now()))
         c.execute(update(ventas).where(ventas.c.id == vid).values(anulada=True))
+    persistir(["ventas", "productos", "movimientos_stock"], f"Anula venta #{vid}")
 
 
 def ventas_df(desde: datetime, hasta: datetime, incluir_anuladas=False) -> pd.DataFrame:
@@ -351,6 +421,7 @@ def crear_reparacion(**d) -> int:
             fecha_ingreso=now, fecha_estado=now, **d)).inserted_primary_key[0]
         c.execute(insert(reparacion_log).values(
             reparacion_id=rid, estado=d["estado"], nota="Ingreso del equipo", fecha=now))
+    persistir(["reparaciones", "reparacion_log"], f"Ingreso reparación #{rid}")
     return rid
 
 
@@ -375,6 +446,7 @@ def actualizar_reparacion(rid: int, nota: str = "", **campos):
             c.execute(insert(reparacion_log).values(
                 reparacion_id=rid, estado=nuevo_estado, nota=nota, fecha=now))
         c.execute(update(reparaciones).where(reparaciones.c.id == rid).values(**campos))
+    persistir(["reparaciones", "reparacion_log"], f"Reparación #{rid}: {campos.get('estado', 'edición')}")
 
 
 def reparaciones_df() -> pd.DataFrame:
@@ -396,3 +468,4 @@ def eliminar_reparacion(rid: int):
     with get_engine().begin() as c:
         c.execute(delete(reparacion_log).where(reparacion_log.c.reparacion_id == rid))
         c.execute(delete(reparaciones).where(reparaciones.c.id == rid))
+    persistir(["reparaciones", "reparacion_log"], f"Elimina reparación #{rid}")

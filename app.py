@@ -2,7 +2,7 @@ import hmac
 
 import streamlit as st
 
-from core import db, ui
+from core import db, storage, ui
 
 st.set_page_config(page_title="CeluPOS", page_icon="📱", layout="wide", initial_sidebar_state="expanded")
 ui.setup_page()
@@ -33,7 +33,17 @@ def _password_ok() -> bool:
 if not _password_ok():
     st.stop()
 
-db.get_engine()
+try:
+    db.get_engine()
+except Exception as e:  # noqa: BLE001
+    st.error("No pude leer los datos guardados en GitHub, así que la app no arranca para no perder nada.")
+    st.code(str(e))
+    st.info("Revisá GITHUB_TOKEN y DATA_REPO en Secrets, y que el token tenga permiso de lectura/escritura sobre ese repo.")
+    if st.button("Reintentar"):
+        st.cache_resource.clear()
+        st.rerun()
+    st.stop()
+
 ui.sidebar_brand(db.get_config("negocio"))
 
 pages = {
@@ -57,7 +67,16 @@ nav = st.navigation(pages)
 
 with st.sidebar:
     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-    motor = "SQLite local" if db.is_sqlite() else "Postgres (nube)"
-    st.caption(f"Base de datos: **{motor}**")
+    est = storage.estado()
+    if not est["habilitado"]:
+        st.caption("💾 Guardado local (data/) · sin respaldo en GitHub")
+    elif est["error"] or est["pendientes"]:
+        st.error(f"⚠️ Hay cambios sin subir a GitHub: {', '.join(est['pendientes'])}")
+        if st.button("Reintentar guardado", width="stretch"):
+            db.persistir(est["pendientes"], "Reintento de guardado")
+            st.rerun()
+    else:
+        hora = est["ultimo_ok"].strftime("%H:%M:%S") if est["ultimo_ok"] else "—"
+        st.caption(f"☁️ Guardado en GitHub · último cambio {hora}")
 
 nav.run()

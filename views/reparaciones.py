@@ -23,25 +23,117 @@ def calc(r: pd.DataFrame) -> pd.DataFrame:
     return r
 
 
+CONDICIONES_DEFAULT = ("El presupuesto puede variar si se detectan fallas adicionales; cualquier cambio se consulta previamente al cliente. "
+                       "Pasados 90 días desde el aviso de equipo listo, el local no se responsabiliza por el mismo. "
+                       "No nos hacemos responsables por la información contenida en el equipo ni por chips o memorias no declarados. "
+                       "Para retirar el equipo es indispensable presentar esta orden.")
+
+
 def orden_html(r: dict) -> str:
+    """Orden de reparación en A4 apaisada: copia LOCAL a la izquierda y copia CLIENTE a la derecha."""
     neg = ui.esc(db.get_config("negocio"))
-    return f"""<html><head><meta charset='utf-8'><title>Orden #{r['id']}</title>
-    <style>body{{font-family:Arial;max-width:640px;margin:20px auto;color:#111}}h1{{margin:0}}td{{padding:6px 4px;border-bottom:1px solid #ddd}}
-    .box{{border:2px solid #111;border-radius:10px;padding:12px;margin-top:12px}}</style></head><body onload='window.print()'>
-    <h1>{neg}</h1><p>Orden de servicio técnico <b>#{r['id']}</b> · Ingreso {pd.to_datetime(r['fecha_ingreso']):%d/%m/%Y %H:%M}</p>
-    <table width='100%'>
-    <tr><td><b>Cliente</b></td><td>{ui.esc(r['cliente'])} · {ui.esc(r['telefono'])}</td></tr>
-    <tr><td><b>Equipo</b></td><td>{ui.esc(r['marca'])} {ui.esc(r['modelo'])}</td></tr>
-    <tr><td><b>IMEI / Serie</b></td><td>{ui.esc(r['imei'])}</td></tr>
-    <tr><td><b>Accesorios</b></td><td>{ui.esc(r['accesorios'])}</td></tr>
-    <tr><td><b>Reparación</b></td><td>{ui.esc(r['falla'])}</td></tr>
-    <tr><td><b>Presupuesto</b></td><td>{ui.ars(r['presupuesto'])}</td></tr>
-    <tr><td><b>Seña</b></td><td>{ui.ars(r['senia'])}</td></tr>
-    <tr><td><b>Saldo</b></td><td><b>{ui.ars(max((r['presupuesto'] or 0) - (r['senia'] or 0), 0))}</b></td></tr>
-    <tr><td><b>Estado</b></td><td>{ui.esc(r['estado'])}</td></tr></table>
-    <div class='box' style='font-size:12px'>Pasados 90 días sin retirar el equipo, el local no se responsabiliza por el mismo.
-    El presupuesto puede variar si se detectan fallas adicionales, previa consulta al cliente.</div>
-    <p style='margin-top:50px'>Firma cliente: ______________________</p></body></html>"""
+    dire = ui.esc(db.get_config("direccion"))
+    tel_local = ui.esc(db.get_config("telefono_local"))
+    cond = ui.esc(db.get_config("condiciones") or CONDICIONES_DEFAULT)
+    ingreso = pd.to_datetime(r["fecha_ingreso"])
+    pres = float(r["presupuesto"] or 0)
+    senia = float(r["senia"] or 0)
+    saldo = max(pres - senia, 0)
+    nro = f"{int(r['id']):06d}"
+    contacto = " · ".join(x for x in [dire, tel_local] if x)
+
+    def fila(lbl, val, grande=False):
+        return f"<tr><th>{lbl}</th><td class='{'big' if grande else ''}'>{val or '&nbsp;'}</td></tr>"
+
+    def copia(tipo: str) -> str:
+        es_local = tipo == "local"
+        etiqueta = "COPIA LOCAL" if es_local else "COPIA CLIENTE"
+        extra = ""
+        if es_local:
+            extra = f"""
+            <div class="sec">Uso interno</div>
+            <table class="t">
+              {fila("Costo repuesto", ui.ars(r.get("costo_repuesto") or 0) if r.get("costo_repuesto") else "")}
+              {fila("Técnico / envío a", "")}
+              {fila("Notas", ui.esc(r.get("notas") or ""))}
+            </table>
+            <div class="firmas"><div>Firma y aclaración del cliente<br><small>Acepto presupuesto y condiciones</small></div></div>"""
+        else:
+            extra = f"""
+            <div class="cond"><b>Condiciones:</b> {cond}</div>
+            <div class="firmas"><div>Firma y sello del local</div></div>"""
+        return f"""
+        <section class="copia">
+          <header>
+            <div><div class="neg">{neg}</div><div class="sub">{contacto or "Servicio técnico"}</div></div>
+            <div class="nro"><span>ORDEN N°</span><b>{nro}</b><em>{etiqueta}</em></div>
+          </header>
+          <div class="fecha">Ingreso: <b>{ingreso:%d/%m/%Y %H:%M}</b></div>
+          <div class="sec">Cliente</div>
+          <table class="t">
+            {fila("Nombre", ui.esc(r.get("cliente")))}
+            {fila("Teléfono", ui.esc(r.get("telefono")))}
+          </table>
+          <div class="sec">Equipo</div>
+          <table class="t">
+            {fila("Marca / Modelo", f"{ui.esc(r.get('marca'))} {ui.esc(r.get('modelo'))}", True)}
+            {fila("IMEI / Serie", ui.esc(r.get("imei")))}
+            {fila("Deja con", ui.esc(r.get("accesorios")))}
+            {fila("Reparación / falla", ui.esc(r.get("falla")))}
+          </table>
+          <div class="importes">
+            <div><span>Presupuesto</span><b>{ui.ars(pres)}</b></div>
+            <div><span>Seña</span><b>{ui.ars(senia)}</b></div>
+            <div class="saldo"><span>Saldo a pagar</span><b>{ui.ars(saldo)}</b></div>
+          </div>
+          {extra}
+        </section>"""
+
+    return f"""<!doctype html><html><head><meta charset='utf-8'><title>Orden {nro}</title>
+<style>
+@page {{ size: A4 landscape; margin: 7mm; }}
+* {{ box-sizing: border-box; }}
+html, body {{ margin: 0; padding: 0; }}
+body {{ font-family: Arial, Helvetica, sans-serif; color: #111; font-size: 10.5pt; -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+.hoja {{ width: 283mm; height: 195mm; display: flex; margin: 0 auto; }}
+.copia {{ width: 50%; height: 100%; padding: 4mm 7mm; display: flex; flex-direction: column; overflow: hidden; }}
+.corte {{ width: 0; border-left: 1.5px dashed #777; position: relative; }}
+.corte span {{ position: absolute; top: 50%; left: -9px; transform: rotate(-90deg); transform-origin: center; font-size: 8pt; color: #777; white-space: nowrap; background: #fff; padding: 0 4px; translate: -42% 0; }}
+header {{ display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 2.5px solid #111; padding-bottom: 3mm; }}
+.neg {{ font-size: 16pt; font-weight: 800; letter-spacing: -.3px; }}
+.sub {{ font-size: 8.5pt; color: #444; margin-top: 1mm; }}
+.nro {{ text-align: right; border: 2px solid #111; border-radius: 6px; padding: 1.5mm 3mm; min-width: 38mm; }}
+.nro span {{ display: block; font-size: 7pt; letter-spacing: 1px; }}
+.nro b {{ display: block; font-size: 17pt; font-family: 'Courier New', monospace; }}
+.nro em {{ display: block; font-style: normal; font-size: 7.5pt; font-weight: 700; background: #111; color: #fff; text-align: center; margin: 1mm -3mm -1.5mm; padding: .6mm 0; border-radius: 0 0 4px 4px; }}
+.fecha {{ margin: 2.5mm 0 1mm; font-size: 9.5pt; }}
+.sec {{ margin-top: 2.5mm; font-size: 7.5pt; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: #555; }}
+.t {{ width: 100%; border-collapse: collapse; margin-top: .8mm; }}
+.t th {{ width: 34mm; text-align: left; font-weight: 600; font-size: 8.5pt; color: #333; vertical-align: top; padding: 1.4mm 0; }}
+.t td {{ border-bottom: 1px solid #bbb; padding: 1.4mm 1mm; vertical-align: top; }}
+.t td.big {{ font-weight: 700; font-size: 11.5pt; }}
+.importes {{ display: flex; gap: 2mm; margin-top: 3.5mm; }}
+.importes div {{ flex: 1; border: 1.2px solid #111; border-radius: 5px; padding: 1.5mm 2mm; }}
+.importes span {{ display: block; font-size: 7.5pt; color: #444; }}
+.importes b {{ font-size: 12pt; }}
+.importes .saldo {{ background: #111; color: #fff; }}
+.importes .saldo span {{ color: #ddd; }}
+.cond {{ margin-top: 3mm; font-size: 7.5pt; line-height: 1.35; color: #333; text-align: justify; }}
+.firmas {{ margin-top: auto; display: flex; justify-content: flex-end; padding-top: 6mm; }}
+.firmas div {{ width: 62mm; border-top: 1px solid #111; text-align: center; font-size: 8pt; padding-top: 1mm; }}
+.firmas small {{ color: #555; }}
+.no-print {{ text-align: center; padding: 10px; font-family: Arial; background: #f3f3f3; }}
+.no-print button {{ font-size: 14px; padding: 8px 18px; cursor: pointer; }}
+@media print {{ .no-print {{ display: none; }} }}
+</style></head>
+<body onload="setTimeout(() => window.print(), 300)">
+<div class="no-print">Configurá la impresión en <b>A4 · Horizontal</b> y márgenes <b>Ninguno/Predeterminados</b>. <button onclick="window.print()">🖨️ Imprimir</button></div>
+<div class="hoja">
+  {copia("local")}
+  <div class="corte"><span>✂ cortar por aquí</span></div>
+  {copia("cliente")}
+</div>
+</body></html>"""
 
 
 @st.dialog("Orden de servicio", width="large")
@@ -81,7 +173,7 @@ def abrir(rid: int):
         st.rerun()
 
     x1, x2 = st.columns(2)
-    x1.download_button("🖨️ Imprimir orden", orden_html(r), f"orden_{rid}.html", "text/html", width="stretch")
+    x1.download_button("🖨️ Imprimir orden (2 copias A4)", orden_html(r), f"orden_{rid:06d}.html", "text/html", width="stretch")
     with x2.popover("🗑️ Eliminar", width="stretch"):
         st.write("¿Seguro? No se puede deshacer.")
         if st.button("Sí, eliminar", type="primary"):
@@ -200,8 +292,8 @@ with tab_n:
                     falla=falla.strip(), accesorios=accesorios.strip(), presupuesto=presupuesto,
                     senia=senia if deja_senia else 0, costo_repuesto=repuesto, mano_obra=mo, estado=estado)
                 st.success(f"✓ Orden #{rid} registrada")
-                st.download_button("🖨️ Imprimir orden para el cliente", orden_html(db.get_reparacion(rid)),
-                                   f"orden_{rid}.html", "text/html")
+                st.download_button("🖨️ Imprimir orden (copia local + cliente, A4)", orden_html(db.get_reparacion(rid)),
+                                   f"orden_{rid:06d}.html", "text/html")
 
 with tab_l:
     if rep.empty:

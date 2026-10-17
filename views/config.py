@@ -15,10 +15,18 @@ with st.container(border=True):
         negocio = a.text_input("Nombre del negocio", value=db.get_config("negocio"))
         fee = b.number_input("Fee general de mano de obra por reparación ($)", min_value=0.0, step=500.0, format="%.0f",
                              value=db.fee_mano_obra(), help="Se precarga en cada reparación nueva; podés cambiarlo caso por caso.")
+        c1, c2 = st.columns(2)
+        direccion = c1.text_input("Dirección (sale en la orden de reparación)", value=db.get_config("direccion"))
+        tel_local = c2.text_input("Teléfono / WhatsApp del local", value=db.get_config("telefono_local"))
+        condiciones = st.text_area("Condiciones de la orden de reparación (vacío = texto estándar)",
+                                   value=db.get_config("condiciones"), height=90)
         cats = st.text_area("Categorías (separadas por coma)", value=db.get_config("categorias"))
         if st.form_submit_button("Guardar", type="primary"):
             db.set_config("negocio", negocio.strip() or "CeluPOS")
             db.set_config("fee_mano_obra", fee)
+            db.set_config("direccion", direccion.strip())
+            db.set_config("telefono_local", tel_local.strip())
+            db.set_config("condiciones", condiciones.strip())
             db.set_config("categorias", ",".join(c.strip() for c in cats.split(",") if c.strip()))
             st.toast("✓ Configuración guardada")
             st.rerun()
